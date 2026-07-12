@@ -1,5 +1,5 @@
 """SQLite ORM (SQLModel) — Person, Fact, Conversation."""
-from sqlmodel import SQLModel, Field, create_engine, Session, select, true, text, and_, func, col
+from sqlmodel import SQLModel, Field, create_engine, Session, desc, select, true, text, and_, func, col
 from typing import Optional
 from datetime import datetime, timezone
 from enum import Enum
@@ -51,7 +51,7 @@ class Person(SQLModel, table=True):
     id: str = Field(default_factory=newID, primary_key=True)
     name: str
     relation: str = Field(default="unknown")
-    relation_confidence : int = Field(default=1.0)
+    relation_confidence : float = Field(default=1.0)
     first_seen: str = Field(default_factory=utcnow)
     last_seen: str = Field(default_factory=utcnow)
     visit_count: int = Field(default=0)
@@ -87,7 +87,7 @@ class Person(SQLModel, table=True):
 class Conversation(SQLModel, table=True):
     __tablename__ = "conversation"
 
-    id:                         str = Field(default_factory=new_id, primary_key=True)
+    id:                         str = Field(default_factory=newID, primary_key=True)
     person_id:                  str = Field(foreign_key="person.id")
     timestamp:                  str = Field(default_factory=utcnow)
     duration_seconds:           int = Field(default=0)
@@ -122,7 +122,7 @@ class AtomicFact(SQLModel, table=True):
 class PersonRelation(SQLModel, table=True):
     __tablename__ = "person_relation"
 
-    id:             str = Field(default_factory=new_id, primary_key=True)
+    id:             str = Field(default_factory=newID, primary_key=True)
     person_a_id:    str = Field(foreign_key="person.id")
     person_b_id:    str = Field(foreign_key="person.id")
     relation_type:  RelationType
@@ -217,3 +217,193 @@ class StructuredStore:
                 .order_by(col(Conversation.timestamp).desc())
                 .limit(limit)
             ))
+    
+    def get_top_facts(self, person_id: str, limit: int = 5) -> list[AtomicFact]:
+        with Session(self.engine) as s:
+            return list(s.exec(
+                select(AtomicFact)
+                .where(
+                    AtomicFact.person_id == person_id,
+                    AtomicFact.is_outdated == False
+                )
+            .order_by(col(AtomicFact.confidence).desc())
+            .limit(limit)
+            ).all())
+    
+    def get_all_active_facts(self, person_id: str) -> list[AtomicFact]:
+        with Session(self.engine) as s:
+            return list(s.exec(
+                select(AtomicFact)
+                .where(
+                    AtomicFact.person_id == person_id,
+                    AtomicFact.is_outdated == False
+                )
+                .order_by(col(AtomicFact.confidence).desc())
+            ).all())
+
+    def get_patient_profile(self) -> dict[str, str]:
+        with Session(self.engine) as s:
+            rows = s.exec(select(PatientProfile)).all()
+            return {r.key: r.value for r in rows}
+    
+    def get_inter_person_relations(self, person_id: str) -> list[PersonRelation]:
+        with Session(self.engine) as s:
+            return list(s.exec(
+                select(PersonRelation)
+                .where(PersonRelation.person_a_id == person_id)
+                .order_by(col(PersonRelation.confidence).desc())
+            ).all())
+    
+    #MAYBE BROKEN
+    def get_shared_connections(self, person_a: str,
+                               person_b: str) -> list[PersonRelation]:
+        """People that both A and B know. Used in social context for recall."""
+        with Session(self.engine) as s:
+            a_targets = s.exec(
+                select(PersonRelation.person_b_id)
+                .where(PersonRelation.person_a_id == person_a)
+            ).all()
+            b_targets = s.exec(
+                select(PersonRelation.person_b_id)
+                .where(PersonRelation.person_a_id == person_b)
+            ).all()
+            shared_ids = set(a_targets) & set(b_targets)
+            if not shared_ids:
+                return []
+            a = list(s.exec(
+                select(PersonRelation)
+                .where(col(Person.id).in_(shared_ids))
+            ).all())
+
+            return a
+
+    # ── Consolidation agent writes ────────────────────────────────────
+
+    def save_person(self, person: Person) -> None:
+        with Session(self.engine) as s:
+            s.add(person)
+            s.commit()
+            s.refresh(person)
+
+    def save_conversation(self, conv: Conversation) -> None:
+        with Session(self.engine) as s:
+            s.add(conv)
+            s.commit()
+
+    def save_fact(self, fact: AtomicFact) -> None:
+        with Session(self.engine) as s:
+            s.add(fact)
+            s.commit()
+
+    def mark_fact_outdated(self, fact_id: str,
+                           superseded_by_id: str) -> None:
+        with Session(self.engine) as s:
+            fact = s.get(AtomicFact, fact_id)
+            if fact:
+                fact.is_outdated = True
+                fact.superseded_by = superseded_by_id
+                s.add(fact)
+                s.commit()
+
+    def update_relationship_summary(self, person_id: str,
+                                    summary: str) -> None:
+        with Session(self.engine) as s:
+            person = s.get(Person, person_id)
+            if person:
+                person.relationship_summary = summary
+                person.relationship_summary_updated = utcnow()
+                s.add(person)
+                s.commit()
+
+    def mark_conversation_consolidated(self, conversation_id: str) -> None:
+        with Session(self.engine) as s:
+            conv = s.get(Conversation, conversation_id)
+            if conv:
+                conv.consolidation_status = ConsolidationStatus.CONSOLIDATED
+                s.add(conv)
+                s.commit()
+
+    def get_pending_consolidations(self) -> list[Conversation]:
+        """
+        Startup recovery: find any sessions that weren't consolidated
+        (e.g. due to crash or API failure). Requeue them.
+        """
+        with Session(self.engine) as s:
+            return list(s.exec(
+                select(Conversation)
+                .where(Conversation.consolidation_status ==
+                       ConsolidationStatus.PENDING)
+                .order_by(col(Conversation.timestamp).asc())
+            ).all())
+
+    def upsert_person_relation(self, rel: PersonRelation) -> None:
+        """
+        Insert or update inter-person relation.
+        If same (a, b, type) exists, update confidence if higher.
+        """
+        with Session(self.engine) as s:
+            existing = s.exec(
+                select(PersonRelation)
+                .where(
+                    PersonRelation.person_a_id == rel.person_a_id,
+                    PersonRelation.person_b_id == rel.person_b_id,
+                    PersonRelation.relation_type == rel.relation_type
+                )
+            ).first()
+            if existing:
+                if rel.confidence > existing.confidence:
+                    existing.confidence = rel.confidence
+                    existing.evidence_text = rel.evidence_text
+                    s.add(existing)
+            else:
+                s.add(rel)
+            s.commit()
+
+    # ── Caregiver portal queries ──────────────────────────────────────
+
+    def get_enrollment_queue(self) -> list[Person]:
+        """Provisional auto-enrolled profiles awaiting caregiver review."""
+        with Session(self.engine) as s:
+            return list(s.exec(
+                select(Person)
+                .where(col(Person.enrollment_status).in_([
+                    EnrollmentStatus.AUTO,
+                    EnrollmentStatus.FLAGGED
+                ]))
+                .order_by(col(Person.first_seen).desc())
+            ).all())
+
+    def confirm_enrollment(self, person_id: str,
+                           confirmed_name: str,
+                           confirmed_relation: str) -> None:
+        with Session(self.engine) as s:
+            person = s.get(Person, person_id)
+            if person:
+                person.name = confirmed_name
+                person.relation = confirmed_relation
+                person.name_confidence = 1.0
+                person.relation_confidence = 1.0
+                person.enrollment_status = EnrollmentStatus.CONFIRMED
+                s.add(person)
+                s.commit()
+
+    def get_all_persons(self, include_unconfirmed: bool = False) -> list[Person]:
+        with Session(self.engine) as s:
+            q = select(Person)
+            if not include_unconfirmed:
+                q = q.where(Person.enrollment_status ==
+                             EnrollmentStatus.CONFIRMED)
+            return list(s.exec(
+                q.order_by(col(Person.last_seen).desc())
+            ).all())
+
+    def update_patient_profile(self, key: str, value: str) -> None:
+        with Session(self.engine) as s:
+            existing = s.get(PatientProfile, key)
+            if existing:
+                existing.value = value
+                existing.last_updated = utcnow()
+                s.add(existing)
+            else:
+                s.add(PatientProfile(key=key, value=value))
+            s.commit()
