@@ -108,7 +108,7 @@ class Conversation(SQLModel, table=True):
 class AtomicFact(SQLModel, table=True):
     __tablename__ = "atomic_fact"
 
-    id:                     str = Field(default_factory=new_id, primary_key=True)
+    id:                     str = Field(default_factory=newID, primary_key=True)
     person_id:              str = Field(foreign_key="person.id")
     fact_text:              str
     confidence:             float = Field(default=0.8)
