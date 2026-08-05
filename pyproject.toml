@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "deepface>=0.0.100",
+    "faiss-gpu>=1.15.0",
     "numpy>=2.5.1",
     "opencv-python>=5.0.0.93",
     "sqlmodel>=0.0.39",
