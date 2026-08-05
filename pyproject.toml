@@ -7,8 +7,10 @@ requires-python = ">=3.13"
 dependencies = [
     "deepface>=0.0.100",
     "faiss-gpu>=1.15.0",
+    "lancedb>=0.36.0",
     "numpy>=2.5.1",
     "opencv-python>=5.0.0.93",
+    "sentence-transformers>=5.6.1",
     "sqlmodel>=0.0.39",
     "ultralytics>=8.4.89",
 ]
