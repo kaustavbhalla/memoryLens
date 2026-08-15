@@ -62,8 +62,7 @@ class RelationshipGraph:
                 "relation": edge["relation"],
                 "confidence": edge["confidence"]
             })
-
-            return relations
+        return relations
 
     def narrow_unknown_face(self, co_present_person_ids: list[str]) -> list[str]:
         candidates = set()
@@ -71,12 +70,10 @@ class RelationshipGraph:
             for neighbour in self.G.successors(known_id):
                 if neighbour != "patient":
                     candidates.add(neighbour)
-
             for neighbour in list(candidates):
-                for second in self.G.successors(known_id):
-                    if neighbour != "patient":
-                        candidates.add(neighbour)
-
+                for second_hop in self.G.successors(neighbour):
+                    if second_hop != "patient":
+                        candidates.add(second_hop)
         candidates -= set(co_present_person_ids)
         return list(candidates)
     

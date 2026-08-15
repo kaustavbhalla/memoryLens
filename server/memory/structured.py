@@ -75,9 +75,8 @@ class Person(SQLModel, table=True):
         if self.relationship_summary:
             s = self.relationship_summary
             if len(s) > 120:
-                return s[120] + "..."
-            else:
-                return s
+                return s[:120] + "..."
+            return s
         return "No history yet"
     
     def mark_seen(self) ->None:
@@ -226,9 +225,9 @@ class StructuredStore:
                     AtomicFact.person_id == person_id,
                     AtomicFact.is_outdated == False
                 )
-            .order_by(col(AtomicFact.confidence).desc())
-            .limit(limit)
-            ).all())
+                .order_by(col(AtomicFact.confidence).desc())
+                .limit(limit)
+            ))
     
     def get_all_active_facts(self, person_id: str) -> list[AtomicFact]:
         with Session(self.engine) as s:

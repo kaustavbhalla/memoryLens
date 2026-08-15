@@ -1,16 +1,27 @@
 [project]
 name = "memorylens"
 version = "0.1.0"
-description = "Add your description here"
+description = "A wearable cognitive prosthetic for dementia and Alzheimer's patients"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "deepface>=0.0.100",
-    "faiss-gpu>=1.15.0",
+    "tf-keras>=2.18.0",
+    "faiss-cpu>=1.15.0",
     "lancedb>=0.36.0",
     "numpy>=2.5.1",
     "opencv-python>=5.0.0.93",
     "sentence-transformers>=5.6.1",
     "sqlmodel>=0.0.39",
     "ultralytics>=8.4.89",
+    "networkx>=3.4",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.10.0",
+    "anthropic>=0.40.0",
+    "langgraph>=0.2.0",
+    "langchain-anthropic>=0.3.0",
+    "langchain-core>=0.3.0",
+    "httpx>=0.28.0",
+    "python-multipart>=0.0.18",
 ]
