@@ -14,8 +14,11 @@ from pydantic import BaseModel
 
 from server.memory.store import memory
 from server.pipelines.vision import VisionPipeline
+from server.pipelines.audio import AudioPipeline
+from server.pipelines.fusion import IdentityFusionEngine
+from server.pipelines.trigger import TriggerDetector
 from server.mode1.deterministic import DeterministicPipeline
-from server.hud.renderer import HUDCard, EmptyCard, RecallCard
+from server.hud.renderer import HUDCard, EmptyCard, RecallCard, UnknownCard
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("memorylens")
@@ -23,7 +26,13 @@ log = logging.getLogger("memorylens")
 # ── Globals ───────────────────────────────────────────────────────────
 
 vision = VisionPipeline()
+audio_pipeline = AudioPipeline()
+fusion = IdentityFusionEngine()
+trigger = TriggerDetector()
 mode1 = DeterministicPipeline()
+
+# Session transcript buffer (list of speaker turns)
+_session_transcript: list[dict] = []
 
 # ── Lifespan ──────────────────────────────────────────────────────────
 
@@ -33,6 +42,11 @@ async def lifespan(app: FastAPI):
     memory.load()
     log.info("Loading vision pipeline (YOLO + DeepFace)…")
     await vision.load()
+    log.info("Loading audio pipeline (WhisperX)…")
+    try:
+        await audio_pipeline.load()
+    except Exception as e:
+        log.warning(f"Audio pipeline failed to load (will retry): {e}")
     log.info("MemoryLens server ready")
     yield
     memory.save()
@@ -57,6 +71,10 @@ app.add_middleware(
 
 class FramePayload(BaseModel):
     image: str  # base64-encoded JPEG
+
+class AudioPayload(BaseModel):
+    audio: str  # base64-encoded PCM (int16, 16kHz, mono)
+    sample_rate: int = 16000
 
 class EnrollPayload(BaseModel):
     name: str
@@ -86,20 +104,65 @@ def decode_image(b64: str) -> np.ndarray:
 
 @app.post("/frame")
 async def process_frame(payload: FramePayload) -> dict:
-    """Mode 1: known face → deterministic HUD card."""
+    """Mode 1: known face → deterministic HUD card via fusion engine."""
     frame = decode_image(payload.image)
     faces = vision.detect_faces(frame)
     if not faces:
         return EmptyCard().to_dict()
 
-    # Use the largest face
-    best = max(faces, key=lambda f: (f["bbox"][2] - f["bbox"][0]) * (f["bbox"][3] - f["bbox"][1]))
-    embedding = VisionPipeline.extract_embedding(best["crop"])
-    if embedding is None:
+    # Process all faces through fusion engine
+    for face in faces:
+        embedding = VisionPipeline.extract_embedding(face["crop"])
+        if embedding is not None:
+            fusion.process_face(embedding)
+
+    # Get best confirmed match from fusion engine
+    best_person = fusion.get_best_match()
+    if best_person is None:
         return EmptyCard().to_dict()
 
-    card = await mode1.run(embedding)
-    return card.to_dict()
+    # Look up person directly (fusion already matched via FAISS)
+    person = memory.db.get_person(best_person.person_id)
+    if person is None:
+        return EmptyCard().to_dict()
+
+    recent = memory.db.get_recent_conversations(best_person.person_id, limit=2)
+    facts = memory.db.get_top_facts(best_person.person_id, limit=5)
+    from server.hud.renderer import build_person_card
+    return build_person_card(person, recent, facts).to_dict()
+
+
+@app.post("/audio")
+async def process_audio(payload: AudioPayload) -> dict:
+    """
+    Process an audio chunk: WhisperX STT + diarization.
+    Returns speaker-labeled transcript segments.
+    Also checks for confusion triggers (Mode 2).
+    """
+    import base64
+    audio_data = base64.b64decode(payload.audio)
+    audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+    try:
+        result = audio_pipeline.process_chunk(audio_array, payload.sample_rate)
+    except Exception as e:
+        log.error(f"Audio processing failed: {e}")
+        return {"error": str(e), "segments": [], "full_text": ""}
+
+    # Add to session transcript
+    for turn in result.speaker_turns:
+        _session_transcript.append(turn)
+
+    # Check for confusion triggers
+    trigger_detected = trigger.check(result.full_text)
+
+    return {
+        "segments": result.speaker_turns,
+        "full_text": result.full_text,
+        "language": result.language,
+        "trigger_detected": trigger_detected,
+        "speaker_texts": result.speaker_texts,
+    }
 
 
 @app.post("/enroll")
@@ -141,9 +204,18 @@ async def enroll_person(payload: EnrollPayload) -> dict:
 
 @app.post("/recall")
 async def trigger_recall(payload: RecallPayload) -> dict:
-    """Mode 2: confusion phrase → LangGraph recall agent (stub for now)."""
-    # Phase 4 will implement the LangGraph agent
-    return RecallCard(narration="Recall agent not yet implemented.").to_dict()
+    """Mode 2: confusion phrase → LangGraph recall agent."""
+    from server.mode2.agent import run_recall_agent
+    try:
+        narration = await run_recall_agent(
+            trigger_phrase=payload.trigger_phrase,
+            confirmed_person_id=payload.confirmed_person_id,
+            session_context=payload.session_context,
+        )
+        return RecallCard(narration=narration).to_dict()
+    except Exception as e:
+        log.error(f"Recall agent error: {e}")
+        return RecallCard(narration="I'm having trouble remembering right now.").to_dict()
 
 
 @app.post("/session/start")

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import os
+import torch
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
@@ -12,15 +13,27 @@ FAISS_DIR = DATA_DIR / "faiss"
 LANCEDB_DIR = DATA_DIR / "lancedb"
 GRAPH_PATH = DATA_DIR / "relationship_graph.pkl"
 
+# ── Compute device ────────────────────────────────────────────────────
+
+COMPUTE_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+COMPUTE_TYPE = "float16" if COMPUTE_DEVICE == "cuda" else "int8"
+
 # ── Face detection ────────────────────────────────────────────────────
 
 FACE_DETECTION_CONFIDENCE = 0.6
 FACE_RECOGNITION_THRESHOLD = 0.6   # cosine similarity (FAISS inner product)
 FACE_REEMBED_INTERVAL_S = 2.0      # re-extract embedding if not confirmed for this long
 
-# ── Voice detection ───────────────────────────────────────────────────
+# ── Voice / Audio (WhisperX) ─────────────────────────────────────────
 
+WHISPERX_MODEL = "large-v3" if COMPUTE_DEVICE == "cuda" else "base"
+WHISPERX_BATCH_SIZE = 16 if COMPUTE_DEVICE == "cuda" else 4
+WHISPERX_LANGUAGE = None   # None = auto-detect, or "en", "hi", etc.
+WHISPERX_MIN_SPEAKERS = 1
+WHISPERX_MAX_SPEAKERS = 4
+HUGGINGFACE_TOKEN = os.getenv("HF_TOKEN", None)  # required for pyannote diarization
 VOICE_RECOGNITION_THRESHOLD = 0.75
+AUDIO_CHUNK_DURATION_S = 30  # process audio in 30-second chunks
 
 # ── Identity fusion ───────────────────────────────────────────────────
 

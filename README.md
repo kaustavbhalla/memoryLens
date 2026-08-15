@@ -1,28 +1,25 @@
-# memorylens
+# MemoryLens
 
-Memory assistance system for dementia patients using multimodal identity recognition and conversational AI.
-
-# 👓 Smart Glasses Identity & Recall Architecture
-
-A wearable AI system built on Raspberry Pi, routing audio-visual streams to a local processing server for real-time identity resolution, agentic recall, and post-session memory consolidation.
+A wearable cognitive prosthetic for dementia & Alzheimer's patients — using multimodal identity recognition, conversational AI, and real-time memory recall.
 
 ---
 
-## 🏗️ System Architecture
+## System Overview
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
-│                       GLASSES / WEARABLE                            │
-│   [Pi Camera NoIR]  [USB Mic]  [SSD1306 OLED]  [Pi Zero 2W]         │
+│                    CAPTURE (Webcam + Mic)                            │
+│   [Webcam]  [USB Mic]  ──►  client/webcam_client.py                 │
 └────────────────────────────┬────────────────────────────────────────┘
-                             │ WiFi stream (video + audio)
+                             │ HTTP (base64 frames + audio chunks)
 ┌────────────────────────────▼────────────────────────────────────────┐
-│                    LOCAL PROCESSING SERVER                          │
+│                    LOCAL PROCESSING SERVER (FastAPI)                 │
 │                                                                     │
 │    Vision Pipeline              Audio Pipeline                      │
-│    YOLO + DeepFace              pyannote + Whisper                  │
-│            │                             │                          │
-│            └────────────┬──────────────┘                          │
+│    YOLOv8n-face + DeepFace      WhisperX (faster-whisper +         │
+│    (ArcFace embeddings)          pyannote diarization +             │
+│            │                     silero-vad)                        │
+│            └────────────┬──────────────┘                            │
 │                         │                                           │
 │                Identity Fusion Engine                               │
 │                "Face A + Voice A = Person X"                        │
@@ -52,7 +49,7 @@ A wearable AI system built on Raspberry Pi, routing audio-visual streams to a lo
 │         │        └──────┬───────┘            │                      │
 │         └───────────────┼────────────────────┘                      │
 │                         │                                           │
-│                 HUD Renderer → OLED / phone                         │
+│                 HUD Renderer → Webcam Overlay (OpenCV)              │
 │                                                                     │
 │  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ SESSION END ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─        │
 │                                                                     │
@@ -69,44 +66,75 @@ A wearable AI system built on Raspberry Pi, routing audio-visual streams to a lo
 
 ---
 
-## 🔬 Component Breakdown
+## Tech Stack
 
-### 1. Hardware Layer (Wearable)
+| Layer | Technology | Why |
+|---|---|---|
+| API server | FastAPI (Python) | Async, fast, typed |
+| Face detection | YOLOv8n-face | Fastest YOLO variant, ~5ms CPU |
+| Face recognition | DeepFace (ArcFace backbone) | Better accuracy than `face_recognition` lib |
+| Speech-to-text + Diarization | **WhisperX** | Unified pipeline: faster-whisper + wav2vec2 alignment + pyannote diarization + silero-vad |
+| Speaker embeddings | pyannote (via WhisperX) | Per-turn voice prints for identity matching |
+| Biometric store | FAISS (flat L2 index) | Sub-10ms ANN, fully in-memory |
+| Structured store | SQLite (WAL mode) via SQLModel | Zero infra, fast reads |
+| Vector store | LanceDB | Embedded, fast filtered search, Arrow-backed |
+| Relationship graph | NetworkX + pickle | In-RAM, trivially small at this scale |
+| LLM | Claude claude-sonnet-4-6 (API) | Best instruction following, structured output |
+| HUD renderer | OpenCV overlay (webcam feed) | No extra hardware — displays on webcam window |
+| Caregiver UI | React + Vite | Fast to scaffold |
 
-The edge device captures real-time environment data and displays context back to the user.
+### Audio Pipeline: WhisperX
 
-- **Microcontroller**: Pi Zero 2W
-- **Vision**: Pi Camera NoIR
-- **Audio**: USB Microphone
-- **Display**: SSD1306 OLED
+WhisperX replaces separate Whisper + pyannote integration with a single unified pipeline:
 
-### 2. Local Processing Server (Real-Time)
+1. **faster-whisper** backend — 70x realtime transcription with CTranslate2 quantization (GPU)
+2. **silero-vad** — Voice Activity Detection reduces hallucination on silence/noise
+3. **wav2vec2 forced alignment** — word-level timestamps for precise speaker attribution
+4. **pyannote diarization** — speaker segmentation + labels (SPEAKER_00, SPEAKER_01, ...)
+5. **`assign_word_speakers()`** — one call maps each word to a speaker
 
-Data is streamed via WiFi to a local server for heavy lifting.
-
-- **Vision Pipeline**: Utilizes **YOLO** (object/face detection) + **DeepFace** (facial recognition/embedding).
-- **Audio Pipeline**: Utilizes **pyannote** (speaker diarization) + **Whisper** (Speech-to-Text).
-- **Identity Fusion Engine**: Merges sensory inputs to create a unified identity profile.
-
----
-
-## ⚡ Operational Modes
-
-| Feature          | Mode 1: Deterministic     | Mode 2: Agentic Recall           | Mode 3: Auto-Enroll         |
-| :--------------- | :------------------------ | :------------------------------- | :-------------------------- |
-| **Trigger**      | Known face recognized     | Confusion phrase in STT stream   | Unknown face detected       |
-| **Architecture** | FAISS → SQLite → HUD      | LangGraph + Claude               | LangGraph                   |
-| **Latency**      | **~20ms** (Ultra-fast)    | ~1.5–3.0s                        | ~3–5s (Runs parallel)       |
-| **LLM Usage**    | None                      | Yes (Decides tool sequence)      | Yes (Agentic drafting)      |
-| **Output**       | Instant HUD Identity Card | Contextual memory / facts on HUD | Background profile creation |
+**GPU acceleration**: Uses CUDA (RTX 3050) for WhisperX inference. Falls back to CPU with `int8` quantization if no GPU available.
 
 ---
 
-## 🧠 Background Pipeline (Post-Session)
+## Operational Modes
 
-When the active session ends, the **Memory Consolidation Agent** organizes and permanently stores the session data.
+| Feature | Mode 1: Deterministic | Mode 2: Agentic Recall | Mode 3: Auto-Enroll |
+|---|---|---|---|
+| **Trigger** | Known face recognized | Confusion phrase in STT | Unknown face detected |
+| **Architecture** | FAISS → SQLite → HUD | LangGraph + Claude | LangGraph |
+| **Latency** | ~20ms (no LLM) | 1.5–3.0s | ~3–5s (background) |
+| **Output** | Context card on webcam | Recall narration on webcam | Provisional profile queued |
 
-1.  **Extraction**: Pulls new facts and inter-person relations from the transcripts.
-2.  **Compression**: Summarizes the new episode into a rolling relationship summary.
-3.  **Conflict Resolution**: Identifies conflicting information and marks outdated facts.
-4.  **Database Writes**: Pushes structured knowledge to SQLite, LanceDB, and NetworkX.
+---
+
+## Build Plan
+
+- [x] Phase 1: Bug fixes + config + unified memory store
+- [x] Phase 2: FastAPI server + vision pipeline + Mode 1
+- [x] Phase 3: Webcam overlay client
+- [x] Phase 4: Mode 2 — LangGraph recall agent
+- [x] Phase 5: Mode 3 — Auto-enrollment agent
+- [ ] Phase 6: Audio pipeline (WhisperX + fusion engine)
+- [ ] Phase 7: Background consolidation agent + session manager
+- [ ] Phase 8: Caregiver UI
+- [ ] Phase 9: Polish
+
+---
+
+## Running
+
+### Server
+```bash
+uv run uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### Webcam Client
+```bash
+uv run python -m client.webcam_client http://127.0.0.1:8000
+```
+
+### Controls
+- `e` — enroll the currently visible person
+- `r` — trigger recall (enter a confusion phrase)
+- `q` — quit
