@@ -18,6 +18,7 @@ from server.pipelines.audio import AudioPipeline
 from server.pipelines.fusion import IdentityFusionEngine
 from server.pipelines.trigger import TriggerDetector
 from server.mode1.deterministic import DeterministicPipeline
+from server.session_manager import session_manager
 from server.hud.renderer import HUDCard, EmptyCard, RecallCard, UnknownCard
 
 logging.basicConfig(level=logging.INFO)
@@ -152,6 +153,8 @@ async def process_audio(payload: AudioPayload) -> dict:
     # Add to session transcript
     for turn in result.speaker_turns:
         _session_transcript.append(turn)
+        # Feed to session manager for consolidation
+        session_manager.add_transcript(turn.get("speaker", "UNKNOWN"), turn.get("text", ""))
 
     # Check for confusion triggers
     trigger_detected = trigger.check(result.full_text)
@@ -224,13 +227,16 @@ async def start_session(payload: SessionStartPayload) -> dict:
     if person:
         person.mark_seen()
         memory.db.save_person(person)
+        session_manager.start_session(payload.person_id, person.name)
         return {"status": "ok", "person": person.name}
     return {"error": "Person not found"}
 
 
 @app.post("/session/end")
 async def end_session(payload: SessionEndPayload) -> dict:
-    return {"status": "ok"}
+    import asyncio
+    asyncio.create_task(session_manager.consolidate_and_end(payload.person_id))
+    return {"status": "consolidation_queued"}
 
 
 # ── Memory / profile reads ────────────────────────────────────────────
@@ -281,3 +287,38 @@ async def confirm_enrollment(
 ) -> dict:
     memory.db.confirm_enrollment(person_id, name, relation)
     return {"status": "confirmed"}
+
+
+@app.get("/patient/identity")
+async def narrate_patient_identity() -> dict:
+    """'Who Am I?' — generates identity narration for the patient."""
+    from server.llm.narrator import narrate_patient_identity
+    profile = memory.db.get_patient_profile()
+    if not profile:
+        return {"narration": "I don't have your profile yet. Please ask your caregiver to set it up."}
+
+    # Get recent interactions (last 7 days)
+    persons = memory.db.get_all_persons()
+    recent = []
+    for p in persons[:5]:
+        convos = memory.db.get_recent_conversations(p.id, limit=1)
+        if convos:
+            recent.append({
+                "person_name": p.name,
+                "relation": p.relation,
+                "summary": convos[0].summary,
+                "days_ago": 0,
+            })
+
+    try:
+        narration = await narrate_patient_identity(profile, recent)
+        return RecallCard(narration=narration).to_dict()
+    except Exception as e:
+        log.error(f"Identity narration failed: {e}")
+        return RecallCard(narration="I'm having trouble remembering right now.").to_dict()
+
+
+@app.post("/patient/profile")
+async def update_patient_profile(key: str, value: str) -> dict:
+    memory.db.update_patient_profile(key, value)
+    return {"status": "ok"}
