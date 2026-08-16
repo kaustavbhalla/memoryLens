@@ -39,6 +39,8 @@ _session_transcript: list[dict] = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     log.info("Loading memory stores…")
     memory.load()
     log.info("Loading vision pipeline (YOLO + DeepFace)…")
@@ -48,8 +50,19 @@ async def lifespan(app: FastAPI):
         await audio_pipeline.load()
     except Exception as e:
         log.warning(f"Audio pipeline failed to load (will retry): {e}")
+
+    # Background task: check silence timeouts and auto-consolidate
+    async def _silence_watcher():
+        while True:
+            await asyncio.sleep(30)
+            for pid in session_manager.check_silence_timeouts():
+                log.info(f"Silence timeout for {pid}, consolidating…")
+                asyncio.create_task(session_manager.consolidate_and_end(pid))
+
+    silence_task = asyncio.create_task(_silence_watcher())
     log.info("MemoryLens server ready")
     yield
+    silence_task.cancel()
     memory.save()
     log.info("MemoryLens server shut down")
 
@@ -126,6 +139,11 @@ async def process_frame(payload: FramePayload) -> dict:
     person = memory.db.get_person(best_person.person_id)
     if person is None:
         return EmptyCard().to_dict()
+
+    # Auto-start session for this person
+    person.mark_seen()
+    memory.db.save_person(person)
+    session_manager.start_session(person.id, person.name)
 
     recent = memory.db.get_recent_conversations(best_person.person_id, limit=2)
     facts = memory.db.get_top_facts(best_person.person_id, limit=5)
@@ -316,6 +334,11 @@ async def narrate_patient_identity() -> dict:
     except Exception as e:
         log.error(f"Identity narration failed: {e}")
         return RecallCard(narration="I'm having trouble remembering right now.").to_dict()
+
+
+@app.get("/patient/profile")
+async def get_patient_profile() -> dict:
+    return memory.db.get_patient_profile()
 
 
 @app.post("/patient/profile")
