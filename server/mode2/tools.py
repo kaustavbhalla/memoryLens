@@ -115,17 +115,17 @@ def generate_narration(
     Call this LAST, after you have gathered sufficient context.
     Returns 2-3 sentence narration string, ready for HUD display.
     """
-    import anthropic
-    from server.config import ANTHROPIC_MODEL, ANTHROPIC_MAX_TOKENS_RECALL
+    from openai import OpenAI
+    from server.config import OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL, OPENCODE_MAX_TOKENS_RECALL
 
-    client = anthropic.Anthropic()
+    client = OpenAI(api_key=OPENCODE_API_KEY, base_url=OPENCODE_BASE_URL)
     facts_str = "\n".join(f"- {f}" for f in key_facts) if key_facts else "- None available"
     anchors_str = "\n".join(f"- {a}" for a in social_anchors) if social_anchors else "- None available"
     highlights_str = "\n".join(f"- {h}" for h in conversation_highlights) if conversation_highlights else "- None available"
 
-    msg = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=ANTHROPIC_MAX_TOKENS_RECALL,
+    msg = client.chat.completions.create(
+        model=OPENCODE_MODEL,
+        max_tokens=OPENCODE_MAX_TOKENS_RECALL,
         messages=[{
             "role": "user",
             "content": f"""You are a memory assistant for a dementia patient named {patient_name}.
@@ -143,7 +143,7 @@ Conversation highlights:
 {highlights_str}"""
         }],
     )
-    return msg.content[0].text.strip()
+    return msg.choices[0].message.content.strip()
 
 
 RECALL_TOOLS = [

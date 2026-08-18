@@ -406,3 +406,12 @@ class StructuredStore:
             else:
                 s.add(PatientProfile(key=key, value=value))
             s.commit()
+
+    def has_patient_profile(self) -> bool:
+        """Check if patient profile has at least a name."""
+        profile = self.get_patient_profile()
+        return bool(profile.get("name", "").strip())
+
+    def get_patient_name(self) -> str:
+        """Get patient name or empty string."""
+        return self.get_patient_profile().get("name", "").strip()

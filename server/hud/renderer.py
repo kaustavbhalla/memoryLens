@@ -88,6 +88,7 @@ def build_person_card(
     person: Person,
     conversations: list[Conversation],
     facts: list[AtomicFact],
+    patient_name: str = "",
 ) -> PersonCard:
     """Build a compact HUD card from database records."""
     last_seen = _format_relative_time(person.last_seen)
@@ -102,9 +103,16 @@ def build_person_card(
     if len(summary) > HUD_PERSON_CARD_MAX_CHARS:
         summary = summary[:HUD_PERSON_CARD_MAX_CHARS] + "..."
 
+    # Use patient-relative phrasing ("your daughter" instead of just "daughter")
+    relation = person.relation
+    if relation and patient_name:
+        # Add "your" prefix if not already present
+        if not relation.lower().startswith("your "):
+            relation = f"your {relation}"
+
     return PersonCard(
         name=person.display_name,
-        relation=person.relation,
+        relation=relation,
         last_seen=last_seen,
         summary=summary,
         enrollment_status=person.enrollment_status.value,

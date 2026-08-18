@@ -1,6 +1,7 @@
 """LanceDB conversation RAG."""
 import lancedb
 import numpy as np
+import pyarrow as pa
 from sentence_transformers import SentenceTransformer
 
 class ConversationVectorStore:
@@ -11,15 +12,15 @@ class ConversationVectorStore:
 
     
     def _init_tables(self):
-        schema = {
-            "id": "string",
-            "person_id": "string",
-            "conversation_id": "string",
-            "chunk_text": "string",
-            "timestamp": "string",
-            "chunk_type": "string",
-            "vector": f"vector[384]"
-        }
+        schema = pa.schema([
+            pa.field("id", pa.string()),
+            pa.field("person_id", pa.string()),
+            pa.field("conversation_id", pa.string()),
+            pa.field("chunk_text", pa.string()),
+            pa.field("timestamp", pa.string()),
+            pa.field("chunk_type", pa.string()),
+            pa.field("vector", pa.list_(pa.float32(), 384)),
+        ])
 
         if "chunks" not in self.db.table_names():
             self.db.create_table("chunks", schema=schema)

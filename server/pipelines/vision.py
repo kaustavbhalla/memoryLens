@@ -18,7 +18,7 @@ class VisionPipeline:
         self.detector: YOLO | None = None
 
     async def load(self):
-        self.detector = YOLO("yolov8n-face.pt")
+        self.detector = YOLO("yolov8n.pt")
 
     def detect_faces(self, frame: np.ndarray) -> list[dict]:
         """Detect faces in a frame. Returns list of {bbox, confidence, crop}."""

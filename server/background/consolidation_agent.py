@@ -6,9 +6,9 @@ import uuid
 import logging
 
 from langgraph.prebuilt import create_react_agent
-from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 
-from server.config import ANTHROPIC_MODEL, ANTHROPIC_MAX_TOKENS_RECALL, CONSOLIDATION_MAX_AGENT_STEPS
+from server.config import OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL, OPENCODE_MAX_TOKENS_RECALL, CONSOLIDATION_MAX_AGENT_STEPS
 from server.background.tools import CONSOLIDATION_TOOLS, bind_memory
 from server.background.prompts import CONSOLIDATION_SYSTEM_PROMPT
 from server.memory.store import memory
@@ -17,7 +17,12 @@ log = logging.getLogger("memorylens.consolidation")
 
 bind_memory(memory)
 
-_llm = ChatAnthropic(model=ANTHROPIC_MODEL, max_tokens=ANTHROPIC_MAX_TOKENS_RECALL)
+_llm = ChatOpenAI(
+    model=OPENCODE_MODEL,
+    max_tokens=OPENCODE_MAX_TOKENS_RECALL,
+    api_key=OPENCODE_API_KEY or "placeholder",
+    base_url=OPENCODE_BASE_URL,
+)
 
 consolidation_agent = create_react_agent(
     model=_llm,
@@ -75,6 +80,39 @@ Perform consolidation."""
         log.info(f"Consolidation complete for {person_name}")
     except Exception as e:
         log.error(f"Consolidation failed for {person_name}: {e}")
+
+    # ── Direct writes to structured store (outside agent) ──────────
+    from server.memory.structured import Conversation, AtomicFact, utcnow
+    from sqlmodel import Session as SQLSession
+
+    with SQLSession(memory.db.engine) as sess:
+        # Store conversation
+        convo = Conversation(
+            id=conversation_id,
+            person_id=person_id,
+            summary=new_episode_summary,
+            transcript=new_transcript,
+            emotional_tone=emotional_tone,
+            key_topics=",".join(key_topics) if key_topics else "",
+            timestamp=utcnow(),
+        )
+        sess.add(convo)
+
+        # Store atomic facts
+        for f in new_facts:
+            fact_text = f.get("fact", "") if isinstance(f, dict) else str(f)
+            confidence = f.get("confidence", 0.8) if isinstance(f, dict) else 0.8
+            if fact_text:
+                fact = AtomicFact(
+                    person_id=person_id,
+                    fact_text=fact_text,
+                    confidence=confidence,
+                    source=conversation_id,
+                )
+                sess.add(fact)
+
+        sess.commit()
+    log.info(f"Stored conversation + {len(new_facts)} facts for {person_name}")
 
     # Write inter-person relations to graph (outside agent — direct call)
     if inter_person_relations:

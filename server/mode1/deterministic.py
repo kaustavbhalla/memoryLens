@@ -39,4 +39,4 @@ class DeterministicPipeline:
         facts = memory.db.get_top_facts(person_id, limit=5)
 
         # Step 5 — assemble card (no LLM, pure template)
-        return build_person_card(person, recent, facts)
+        return build_person_card(person, recent, facts, memory.db.get_patient_name())

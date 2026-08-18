@@ -211,19 +211,22 @@ class AudioPipeline:
             end_sample = int(end * sample_rate)
             segment_audio = audio[start_sample:end_sample]
 
-            # Use pyannote's embedding model directly
-            from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
+            # Cache the embedder — creating it every call is slow
+            if not hasattr(self, "_spk_embedder") or self._spk_embedder is None:
+                from speechbrain.inference import EncoderClassifier
+                import torch
+                self._spk_embedder = EncoderClassifier.from_hparams(
+                    source="speechbrain/spkrec-ecapa-voxceleb",
+                    run_opts={"device": COMPUTE_DEVICE},
+                )
+
             import torch
-
-            embedder = PretrainedSpeakerEmbedding(
-                "speechbrain/spkrec-ecapa-voxceleb",
-                device=torch.device(COMPUTE_DEVICE),
-            )
-
             waveform = torch.tensor(segment_audio).unsqueeze(0).float()
+            if COMPUTE_DEVICE == "cuda":
+                waveform = waveform.cuda()
             with torch.no_grad():
-                embedding = embedder({"waveform": waveform, "sample_rate": sample_rate})
-            return embedding.squeeze().numpy()
+                embedding = self._spk_embedder.encode_batch(waveform)
+            return embedding.squeeze().cpu().numpy()
 
         except Exception as e:
             log.warning(f"Failed to extract speaker embedding: {e}")

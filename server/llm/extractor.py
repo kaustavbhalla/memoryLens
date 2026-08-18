@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
-import anthropic
+from openai import OpenAI
 
-from server.config import ANTHROPIC_MODEL, ANTHROPIC_MAX_TOKENS_EXTRACT
+from server.config import OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL, OPENCODE_MAX_TOKENS_EXTRACT
 
 log = logging.getLogger("memorylens.extractor")
 
@@ -51,13 +51,13 @@ async def extract_session_data(
     transcript: str,
     known_people: list[dict],
 ) -> dict:
-    """Single Claude call extracts everything needed to update all stores."""
-    client = anthropic.Anthropic()
+    """Single LLM call extracts everything needed to update all stores."""
+    client = OpenAI(api_key=OPENCODE_API_KEY, base_url=OPENCODE_BASE_URL)
     known_str = "\n".join(f"- {p['name']} (id: {p['id']})" for p in known_people)
 
-    msg = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=ANTHROPIC_MAX_TOKENS_EXTRACT,
+    msg = client.chat.completions.create(
+        model=OPENCODE_MODEL,
+        max_tokens=OPENCODE_MAX_TOKENS_EXTRACT,
         messages=[{
             "role": "user",
             "content": FACT_EXTRACTION_PROMPT.format(
@@ -67,11 +67,10 @@ async def extract_session_data(
         }],
     )
 
+    text = msg.choices[0].message.content
     try:
-        return json.loads(msg.content[0].text)
+        return json.loads(text)
     except json.JSONDecodeError:
-        # Try to extract JSON from markdown code block
-        text = msg.content[0].text
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0]
         elif "```" in text:

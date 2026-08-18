@@ -8,7 +8,7 @@ from pathlib import Path
 class BiometricStore:
     FACE_DIM = 512
     VOICE_DIM = 256
-    THRESHOLD_FACE = 0.6 #cosine similarity
+    THRESHOLD_FACE = 0.75  # cosine similarity — must match config.py FACE_RECOGNITION_THRESHOLD
     THRESHOLD_VOICE = 0.75
 
     def __init__(self, data_dir: Path):

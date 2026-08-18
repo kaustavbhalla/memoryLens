@@ -1,14 +1,13 @@
 """
-MemoryLens Webcam Overlay Client
+MemoryLens Webcam Overlay Client (WebSocket)
 
-Captures webcam frames + mic audio, streams to the FastAPI server,
-and renders HUD cards as OpenCV overlays. Fully automatic — no buttons
-required for normal operation.
+Captures webcam frames + mic audio, streams to the FastAPI server via WebSocket,
+and renders HUD cards as OpenCV overlays. Fully automatic.
 
 Usage:
     python -m client.webcam_client [server_url]
 
-Debug overrides (hold key during operation):
+Debug overrides:
     e  — manually enroll the currently visible person
     r  — manually trigger recall with typed phrase
     q  — quit
@@ -19,22 +18,23 @@ import sys
 import time
 import threading
 import queue
+import asyncio
+import json
 
 import cv2
-import httpx
 import numpy as np
 
 # ── Config ────────────────────────────────────────────────────────────
 
-SERVER_URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+SERVER_URL = sys.argv[1] if len(sys.argv) > 1 else "ws://127.0.0.1:8000/ws"
 WEBCAM_INDEX = 0
 FRAME_W, FRAME_H = 640, 480
-FRAME_SEND_INTERVAL = 0.33   # ~3 FPS to server
+FRAME_SEND_INTERVAL = 0.5   # send frame every 0.5s (server pushes updates)
 
 # Audio
 AUDIO_SAMPLE_RATE = 16000
 AUDIO_CHANNELS = 1
-AUDIO_CHUNK_SECONDS = 10     # send 10s chunks to /audio
+AUDIO_CHUNK_SECONDS = 10
 AUDIO_DTYPE = "int16"
 
 # ── Colors (BGR) ─────────────────────────────────────────────────────
@@ -50,44 +50,41 @@ COLOR_TRANSCRIPT = (180, 180, 180)
 # ── Font ──────────────────────────────────────────────────────────────
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+FONT_SCALE = 0.5
 FONT_SCALE_NAME = 0.7
-FONT_SCALE = 0.45
 FONT_THICK = 2
 FONT_THIN = 1
 
 
-# ── Audio Capture Thread ──────────────────────────────────────────────
+# ── Audio Capture ─────────────────────────────────────────────────────
 
 class AudioCapture:
-    """Continuously captures mic audio and sends chunks to the server."""
+    """Captures mic audio into chunks for WebSocket streaming."""
 
-    def __init__(self, server_url: str):
-        self.server_url = server_url
+    def __init__(self):
         self._audio_queue: queue.Queue[np.ndarray] = queue.Queue()
         self._running = False
         self._thread: threading.Thread | None = None
-        self.last_transcript: str = ""
-        self.last_speaker_texts: dict[str, str] = {}
-        self.trigger_detected: bool = False
-        self._lock = threading.Lock()
 
     def start(self):
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
-        self._sender_thread = threading.Thread(target=self._send_loop, daemon=True)
-        self._sender_thread.start()
 
     def stop(self):
         self._running = False
 
+    def get_chunk(self) -> np.ndarray | None:
+        try:
+            return self._audio_queue.get_nowait()
+        except queue.Empty:
+            return None
+
     def _capture_loop(self):
-        """Capture audio from mic into chunks."""
         try:
             import sounddevice as sd
         except ImportError:
             print("WARNING: sounddevice not installed. Audio capture disabled.")
-            print("  Install: uv add sounddevice")
             return
 
         chunk_samples = AUDIO_SAMPLE_RATE * AUDIO_CHUNK_SECONDS
@@ -96,9 +93,7 @@ class AudioCapture:
 
         def callback(indata, frames, time_info, status):
             nonlocal buffer, write_pos
-            if status:
-                pass  # ignore overflow warnings
-            chunk = indata[:, 0].copy()  # mono
+            chunk = indata[:, 0].copy()
             remaining = chunk_samples - write_pos
             if remaining > 0:
                 take = min(remaining, len(chunk))
@@ -110,7 +105,7 @@ class AudioCapture:
                 samplerate=AUDIO_SAMPLE_RATE,
                 channels=AUDIO_CHANNELS,
                 dtype=AUDIO_DTYPE,
-                blocksize=int(AUDIO_SAMPLE_RATE * 0.1),  # 100ms blocks
+                blocksize=int(AUDIO_SAMPLE_RATE * 0.1),
                 callback=callback,
             ):
                 while self._running:
@@ -120,36 +115,80 @@ class AudioCapture:
         except Exception as e:
             print(f"Audio capture error: {e}")
 
-    def _send_loop(self):
-        """Send audio chunks to server, update transcript state."""
-        http = httpx.Client(base_url=self.server_url, timeout=30.0)
+
+# ── WebSocket Thread ──────────────────────────────────────────────────
+
+class WebSocketClient:
+    """Manages WebSocket connection to server in a background thread."""
+
+    def __init__(self, server_url: str):
+        self.server_url = server_url
+        self._send_queue: queue.Queue[dict] = queue.Queue()
+        self._recv_queue: queue.Queue[dict] = queue.Queue()
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._connected = threading.Event()
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._ws_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+
+    def is_connected(self) -> bool:
+        return self._connected.is_set()
+
+    def send(self, msg: dict):
+        self._send_queue.put(msg)
+
+    def recv(self) -> dict | None:
+        try:
+            return self._recv_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _ws_loop(self):
+        import websockets.sync.client as wsc
+
         while self._running:
             try:
-                audio_chunk = self._audio_queue.get(timeout=1.0)
-            except queue.Queue.Empty:
-                continue
+                with wsc.connect(self.server_url) as ws:
+                    self._connected.set()
+                    print(f"WebSocket connected to {self.server_url}")
 
-            try:
-                b64 = base64.b64encode(audio_chunk.tobytes()).decode()
-                resp = http.post("/audio", json={
-                    "audio": b64,
-                    "sample_rate": AUDIO_SAMPLE_RATE,
-                })
-                data = resp.json()
-                with self._lock:
-                    self.last_transcript = data.get("full_text", "")
-                    self.last_speaker_texts = data.get("speaker_texts", {})
-                    self.trigger_detected = data.get("trigger_detected", False)
-            except Exception:
-                pass
+                    # Sender thread
+                    def _sender():
+                        while self._running:
+                            try:
+                                msg = self._send_queue.get(timeout=0.1)
+                                ws.send(json.dumps(msg))
+                            except queue.Empty:
+                                continue
+                            except Exception:
+                                break
 
-    def get_state(self) -> dict:
-        with self._lock:
-            return {
-                "transcript": self.last_transcript,
-                "speaker_texts": self.last_speaker_texts.copy(),
-                "trigger": self.trigger_detected,
-            }
+                    sender = threading.Thread(target=_sender, daemon=True)
+                    sender.start()
+
+                    # Receiver loop
+                    while self._running:
+                        try:
+                            raw = ws.recv(timeout=1.0)
+                            data = json.loads(raw)
+                            self._recv_queue.put(data)
+                        except TimeoutError:
+                            continue
+                        except Exception:
+                            break
+
+                    self._connected.clear()
+            except Exception as e:
+                if self._running:
+                    self._connected.clear()
+                    print(f"WebSocket disconnected, reconnecting in 3s... ({e})")
+                    time.sleep(3)
 
 
 # ── Drawing Helpers ───────────────────────────────────────────────────
@@ -203,100 +242,72 @@ def draw_person_card(frame: np.ndarray, card: dict) -> np.ndarray:
 
 def draw_recall_card(frame: np.ndarray, card: dict) -> np.ndarray:
     h, w = frame.shape[:2]
+    cv2.rectangle(frame, (0, 0), (w - 1, h - 1), COLOR_RECALL, 3)
+
+    card_w = 400
+    cv2.rectangle(frame, (10, 10), (10 + card_w, 120), COLOR_BG, -1)
+    y = 35
+    cv2.putText(frame, "RECALL", (20, y), FONT, 0.6, COLOR_RECALL, FONT_THICK)
+    y += 25
     narration = card.get("narration", "")
-    bar_h = 130
-    cv2.rectangle(frame, (0, h - bar_h), (w, h), COLOR_BG, -1)
-    cv2.rectangle(frame, (0, h - bar_h), (w, h), COLOR_RECALL, 2)
-    cv2.putText(frame, "RECALL", (15, h - bar_h + 22),
-                FONT, 0.5, COLOR_RECALL, FONT_THIN)
-    lines = wrap_text(narration, w - 30, FONT, FONT_SCALE, FONT_THIN)
-    y = h - bar_h + 42
-    for line in lines[:4]:
-        cv2.putText(frame, line, (15, y), FONT, FONT_SCALE, COLOR_TEXT, FONT_THIN)
-        y += 20
+    for line in wrap_text(narration, card_w - 10, FONT, FONT_SCALE, FONT_THIN)[:4]:
+        cv2.putText(frame, line, (20, y), FONT, FONT_SCALE, COLOR_TEXT, FONT_THIN)
+        y += 18
     return frame
 
 
-def draw_transcript_bar(frame: np.ndarray, audio_state: dict) -> np.ndarray:
-    """Show live transcript at the bottom of the frame."""
+def draw_transcript_bar(frame: np.ndarray, transcript: str) -> np.ndarray:
     h, w = frame.shape[:2]
-    transcript = audio_state.get("transcript", "")
-    if not transcript:
-        return frame
-
-    bar_h = 60
-    overlay = frame[h - bar_h:h, :].copy()
-    cv2.rectangle(frame, (0, h - bar_h), (w, h), COLOR_BG, -1)
-    cv2.putText(frame, "LIVE", (10, h - bar_h + 18),
-                FONT, 0.35, COLOR_RECALL, FONT_THIN)
-
-    lines = wrap_text(transcript, w - 20, FONT, 0.38, FONT_THIN)
-    y = h - bar_h + 35
-    for line in lines[-2:]:  # show last 2 lines
-        cv2.putText(frame, line, (10, y), FONT, 0.38, COLOR_TRANSCRIPT, FONT_THIN)
-        y += 16
+    bar_y = h - 60
+    cv2.rectangle(frame, (0, bar_y), (w, h), COLOR_BG, -1)
+    cv2.putText(frame, "LIVE", (10, bar_y + 20),
+                FONT, 0.4, (0, 200, 0), FONT_THIN)
+    if transcript:
+        text = transcript[:80]
+        cv2.putText(frame, text, (10, bar_y + 42),
+                    FONT, FONT_SCALE, COLOR_TRANSCRIPT, FONT_THIN)
     return frame
 
 
-def draw_status_bar(frame: np.ndarray, fps: float, audio_state: dict) -> np.ndarray:
+def draw_status_bar(frame: np.ndarray, fps: float, connected: bool) -> np.ndarray:
     h, w = frame.shape[:2]
-    has_audio = bool(audio_state.get("transcript"))
-    audio_icon = "MIC ON" if has_audio else "MIC OFF"
-    status_text = f"FPS: {fps:.0f}  |  {audio_icon}"
-    (tw, _), _ = cv2.getTextSize(status_text, FONT, 0.4, 1)
-    cv2.putText(frame, status_text, (w - tw - 15, 25),
-                FONT, 0.4, (100, 100, 100), 1)
-    hint = "e=enroll  r=recall  q=quit"
-    (hw, _), _ = cv2.getTextSize(hint, FONT, 0.35, 1)
-    cv2.putText(frame, hint, (w - hw - 15, 45), FONT, 0.35, (80, 80, 80), 1)
+    status = f"FPS: {fps:.0f} | WS: {'ON' if connected else 'OFF'}"
+    cv2.putText(frame, status, (w - 200, 20),
+                FONT, 0.4, COLOR_TRANSCRIPT, FONT_THIN)
+    cv2.putText(frame, "e=enroll r=recall q=quit", (w - 200, 38),
+                FONT, 0.35, (120, 120, 120), FONT_THIN)
     return frame
 
-
-# ── Dialogs (debug override) ──────────────────────────────────────────
 
 def enrollment_dialog(frame: np.ndarray) -> dict | None:
-    name, relation, step = "", "", "name"
+    """Debug: type name + relation for manual enrollment."""
+    text = ""
     while True:
         display = frame.copy()
         h, w = display.shape[:2]
-        cv2.rectangle(display, (50, 100), (w - 50, 300), COLOR_BG, -1)
-        cv2.rectangle(display, (50, 100), (w - 50, 300), COLOR_AUTO, 2)
-        cv2.putText(display, "ENROLL NEW PERSON", (70, 135),
+        cv2.rectangle(display, (50, 150), (w - 50, 260), COLOR_BG, -1)
+        cv2.rectangle(display, (50, 150), (w - 50, 260), COLOR_AUTO, 2)
+        cv2.putText(display, "ENROLL", (70, 185),
                     FONT, 0.6, COLOR_AUTO, FONT_THICK)
-        if step == "name":
-            cv2.putText(display, f"Name: {name}_", (70, 175),
-                        FONT, 0.55, COLOR_TEXT, FONT_THIN)
-            cv2.putText(display, "(type name, Enter to confirm)", (70, 210),
-                        FONT, 0.4, (150, 150, 150), 1)
-        else:
-            cv2.putText(display, f"Name: {name}", (70, 175),
-                        FONT, 0.55, COLOR_TEXT, FONT_THIN)
-            cv2.putText(display, f"Relation: {relation}_", (70, 210),
-                        FONT, 0.55, COLOR_TEXT, FONT_THIN)
-            cv2.putText(display, "(daughter, doctor, friend, etc.)", (70, 245),
-                        FONT, 0.4, (150, 150, 150), 1)
+        cv2.putText(display, f'"{text}_"', (70, 220),
+                    FONT, 0.5, COLOR_TEXT, FONT_THIN)
         cv2.imshow("MemoryLens", display)
         key = cv2.waitKey(0) & 0xFF
         if key == 27:
             return None
-        elif key == 13:
-            if step == "name" and name:
-                step = "relation"
-            elif step == "relation":
-                return {"name": name, "relation": relation or "unknown"}
+        elif key == 13 and text:
+            parts = text.split(",", 1)
+            name = parts[0].strip()
+            relation = parts[1].strip() if len(parts) > 1 else "unknown"
+            return {"name": name, "relation": relation}
         elif key == 8:
-            if step == "name":
-                name = name[:-1]
-            else:
-                relation = relation[:-1]
+            text = text[:-1]
         elif 32 <= key <= 126:
-            if step == "name":
-                name += chr(key)
-            else:
-                relation += chr(key)
+            text += chr(key)
 
 
 def recall_dialog(frame: np.ndarray) -> str | None:
+    """Debug: type a phrase for manual recall."""
     text = ""
     while True:
         display = frame.copy()
@@ -329,23 +340,21 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
 
-    http = httpx.Client(base_url=SERVER_URL, timeout=10.0)
+    ws_client = WebSocketClient(SERVER_URL)
+    ws_client.start()
 
-    # Start audio capture (automatic)
-    audio = AudioCapture(SERVER_URL)
+    audio = AudioCapture()
     audio.start()
 
-    last_card = None
-    last_mode = "idle"
+    last_card = {"type": "empty"}
     frame_count = 0
     fps_timer = time.time()
     fps = 0.0
-    last_recall_time = 0.0
-    RECALL_COOLDOWN = 30.0  # don't spam recall
+    last_frame_time = 0.0
+    last_transcript = ""
 
-    print(f"MemoryLens connected to {SERVER_URL}")
-    print("Audio capture started. System is fully automatic.")
-    print("Debug: e=enroll  r=manual recall  q=quit")
+    print(f"MemoryLens connecting to {SERVER_URL}")
+    print("System is fully automatic. Debug: e=enroll  r=recall  q=quit")
 
     try:
         while True:
@@ -360,104 +369,80 @@ def main():
                 frame_count = 0
                 fps_timer = time.time()
 
-            # ── AUTOMATIC RECALL: check if trigger was detected from audio ──
-            audio_state = audio.get_state()
+            # Send frame to server (throttled)
             now = time.time()
-            if audio_state["trigger"] and (now - last_recall_time) > RECALL_COOLDOWN:
-                last_recall_time = now
-                # Auto-trigger recall with transcript as context
-                try:
-                    # Find confirmed person from last card
-                    person_id = None
-                    if last_card and last_card.get("type") == "person":
-                        person_id = last_card.get("person_id")
+            if ws_client.is_connected() and (now - last_frame_time) >= FRAME_SEND_INTERVAL:
+                last_frame_time = now
+                b64 = encode_frame(frame)
+                ws_client.send({"type": "frame", "image": b64})
 
-                    resp = http.post("/recall", json={
-                        "trigger_phrase": audio_state["transcript"],
-                        "confirmed_person_id": person_id,
-                        "session_context": audio_state["transcript"],
-                    })
-                    last_card = resp.json()
-                    last_mode = "recall"
-                except Exception as e:
-                    print(f"Auto-recall failed: {e}")
+            # Send audio chunks
+            chunk = audio.get_chunk()
+            if chunk is not None and ws_client.is_connected():
+                b64 = base64.b64encode(chunk.tobytes()).decode()
+                ws_client.send({"type": "audio", "audio": b64, "sample_rate": AUDIO_SAMPLE_RATE})
 
-            # ── Debug overrides (hold key) ──
+            # Receive server updates
+            while True:
+                msg = ws_client.recv()
+                if msg is None:
+                    break
+                msg_type = msg.get("type", "")
+                if msg_type in ("person", "unknown", "recall", "empty"):
+                    last_card = msg
+                elif msg_type == "transcript":
+                    last_transcript = msg.get("full_text", "")
+                elif msg_type == "error":
+                    print(f"Server error: {msg.get('error')}")
+
+            # Debug overrides
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
             elif key == ord("e"):
                 result = enrollment_dialog(frame)
-                if result:
+                if result and ws_client.is_connected():
                     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     b64 = base64.b64encode(buf).decode()
-                    try:
-                        resp = http.post("/enroll", json={
-                            "name": result["name"],
-                            "relation": result["relation"],
-                            "image": b64,
-                        })
-                        data = resp.json()
-                        if "error" in data:
-                            print(f"Enroll error: {data['error']}")
-                        else:
-                            print(f"Enrolled: {data['name']} ({data['relation']})")
-                    except Exception as e:
-                        print(f"Enroll failed: {e}")
-                    continue
+                    ws_client.send({
+                        "type": "enroll",
+                        "name": result["name"],
+                        "relation": result["relation"],
+                        "image": b64,
+                    })
+                    print(f"Enrolled: {result['name']} ({result['relation']})")
+                continue
             elif key == ord("r"):
                 phrase = recall_dialog(frame)
-                if phrase:
-                    try:
-                        resp = http.post("/recall", json={
-                            "trigger_phrase": phrase,
-                            "session_context": audio_state.get("transcript", ""),
-                        })
-                        last_card = resp.json()
-                        last_mode = "recall"
-                    except Exception as e:
-                        print(f"Manual recall failed: {e}")
-                    continue
+                if phrase and ws_client.is_connected():
+                    person_id = last_card.get("person_id") if last_card.get("type") == "person" else None
+                    ws_client.send({
+                        "type": "recall",
+                        "trigger_phrase": phrase,
+                        "confirmed_person_id": person_id,
+                        "session_context": last_transcript,
+                    })
+                continue
 
-            # ── Send frame to server (throttled) ──
-            if now - getattr(main, "_last_send", 0) >= FRAME_SEND_INTERVAL:
-                main._last_send = now
-                try:
-                    b64 = encode_frame(frame)
-                    resp = http.post("/frame", json={"image": b64})
-                    last_card = resp.json()
-                    card_type = last_card.get("type", "empty")
-                    last_mode = {
-                        "person": "mode1",
-                        "recall": "mode2",
-                        "unknown": "mode3",
-                        "empty": "idle",
-                    }.get(card_type, "idle")
-                except Exception:
-                    pass
-
-            # ── Render overlay ──
+            # Render overlay
             display = frame.copy()
-            if last_card:
-                t = last_card.get("type", "empty")
-                if t == "person":
-                    display = draw_person_card(display, last_card)
-                elif t == "recall":
-                    display = draw_recall_card(display, last_card)
-                elif t == "unknown":
-                    display = draw_unknown(display)
+            t = last_card.get("type", "empty")
+            if t == "person":
+                display = draw_person_card(display, last_card)
+            elif t == "recall":
+                display = draw_recall_card(display, last_card)
+            elif t == "unknown":
+                display = draw_unknown(display)
 
-            display = draw_transcript_bar(display, audio_state)
-            display = draw_status_bar(display, fps, audio_state)
+            display = draw_transcript_bar(display, last_transcript)
+            display = draw_status_bar(display, fps, ws_client.is_connected())
             cv2.imshow("MemoryLens", display)
 
-    except KeyboardInterrupt:
-        pass
     finally:
         audio.stop()
+        ws_client.stop()
         cap.release()
         cv2.destroyAllWindows()
-        http.close()
 
 
 def draw_unknown(frame: np.ndarray) -> np.ndarray:

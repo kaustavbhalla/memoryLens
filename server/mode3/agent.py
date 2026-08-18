@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 from langgraph.prebuilt import create_react_agent
-from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 
-from server.config import ANTHROPIC_MODEL, ANTHROPIC_MAX_TOKENS_ENROLL, AUTO_ENROLL_MAX_AGENT_STEPS
+from server.config import OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL, OPENCODE_MAX_TOKENS_ENROLL, AUTO_ENROLL_MAX_AGENT_STEPS
 from server.mode3.tools import AUTO_ENROLL_TOOLS, bind_memory
 from server.mode3.prompts import AUTO_ENROLL_SYSTEM_PROMPT
 from server.memory.store import memory
 
 bind_memory(memory)
 
-_llm = ChatAnthropic(model=ANTHROPIC_MODEL, max_tokens=ANTHROPIC_MAX_TOKENS_ENROLL)
+_llm = ChatOpenAI(
+    model=OPENCODE_MODEL,
+    max_tokens=OPENCODE_MAX_TOKENS_ENROLL,
+    api_key=OPENCODE_API_KEY or "placeholder",
+    base_url=OPENCODE_BASE_URL,
+)
 
 auto_enroll_agent = create_react_agent(
     model=_llm,

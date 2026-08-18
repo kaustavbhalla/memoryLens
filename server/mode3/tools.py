@@ -32,12 +32,12 @@ def extract_name_from_context(session_context: str, speaker_label: str) -> dict:
     Confidence: 1.0 = self-introduced, 0.9 = addressed multiple times,
                 0.7 = addressed once, 0.4 = inferred, 0.0 = not found.
     """
-    import anthropic
-    from server.config import ANTHROPIC_MODEL
+    from openai import OpenAI
+    from server.config import OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL
 
-    client = anthropic.Anthropic()
-    msg = client.messages.create(
-        model=ANTHROPIC_MODEL,
+    client = OpenAI(api_key=OPENCODE_API_KEY, base_url=OPENCODE_BASE_URL)
+    msg = client.chat.completions.create(
+        model=OPENCODE_MODEL,
         max_tokens=200,
         messages=[{
             "role": "user",
@@ -51,7 +51,7 @@ Return ONLY valid JSON:
         }],
     )
     import json
-    return json.loads(msg.content[0].text)
+    return json.loads(msg.choices[0].message.content)
 
 
 @tool
@@ -65,12 +65,12 @@ def infer_relation_from_context(
     Returns: {relation: str, confidence: float, evidence: str}
     Be conservative — return "unknown" with low confidence rather than guessing.
     """
-    import anthropic, json
-    from server.config import ANTHROPIC_MODEL
+    from openai import OpenAI
+    from server.config import OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL
 
-    client = anthropic.Anthropic()
-    msg = client.messages.create(
-        model=ANTHROPIC_MODEL,
+    client = OpenAI(api_key=OPENCODE_API_KEY, base_url=OPENCODE_BASE_URL)
+    msg = client.chat.completions.create(
+        model=OPENCODE_MODEL,
         max_tokens=200,
         messages=[{
             "role": "user",
@@ -84,7 +84,8 @@ Return ONLY valid JSON:
 {{"relation": "daughter", "confidence": 0.0-1.0, "evidence": "patient called them beta"}}"""
         }],
     )
-    return json.loads(msg.content[0].text)
+    import json
+    return json.loads(msg.choices[0].message.content)
 
 
 @tool

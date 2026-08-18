@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
-import anthropic
+from openai import OpenAI
 
-from server.config import ANTHROPIC_MODEL, ANTHROPIC_MAX_TOKENS_NARRATE
+from server.config import OPENCODE_API_KEY, OPENCODE_BASE_URL, OPENCODE_MODEL, OPENCODE_MAX_TOKENS_NARRATE
 
 log = logging.getLogger("memorylens.narrator")
 
@@ -21,7 +21,7 @@ Recent interactions (last 7 days): {recent}"""
 
 
 async def narrate_patient_identity(profile: dict, recent: list[dict]) -> str:
-    client = anthropic.Anthropic()
+    client = OpenAI(api_key=OPENCODE_API_KEY, base_url=OPENCODE_BASE_URL)
 
     recent_text = "\n".join(
         f"- {r.get('person_name', 'Someone')} ({r.get('relation', 'unknown')}): "
@@ -29,9 +29,9 @@ async def narrate_patient_identity(profile: dict, recent: list[dict]) -> str:
         for r in recent
     ) if recent else "- No recent interactions"
 
-    msg = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=ANTHROPIC_MAX_TOKENS_NARRATE,
+    msg = client.chat.completions.create(
+        model=OPENCODE_MODEL,
+        max_tokens=OPENCODE_MAX_TOKENS_NARRATE,
         messages=[{
             "role": "user",
             "content": IDENTITY_PROMPT.format(
@@ -40,4 +40,4 @@ async def narrate_patient_identity(profile: dict, recent: list[dict]) -> str:
             )
         }],
     )
-    return msg.content[0].text.strip()
+    return msg.choices[0].message.content.strip()

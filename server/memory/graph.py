@@ -115,6 +115,13 @@ class RelationshipGraph:
                     if d.get("type") == "person"]
         return people[:top_n]
 
+    def set_patient_name(self, name: str):
+        """Set the patient's name on the root node."""
+        self.G.nodes["patient"]["name"] = name
+
+    def get_patient_name(self) -> str:
+        """Get the patient's name from the root node."""
+        return self.G.nodes.get("patient", {}).get("name", "")
 
     def save(self):
         with open(self.path, "wb") as f:

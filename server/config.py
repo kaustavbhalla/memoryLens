@@ -2,7 +2,11 @@
 
 from pathlib import Path
 import os
+from dotenv import load_dotenv
 import torch
+
+# Load .env from project root
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # ── Paths ─────────────────────────────────────────────────────────────
 
@@ -21,7 +25,7 @@ COMPUTE_TYPE = "float16" if COMPUTE_DEVICE == "cuda" else "int8"
 # ── Face detection ────────────────────────────────────────────────────
 
 FACE_DETECTION_CONFIDENCE = 0.6
-FACE_RECOGNITION_THRESHOLD = 0.6   # cosine similarity (FAISS inner product)
+FACE_RECOGNITION_THRESHOLD = 0.75  # cosine similarity — higher = stricter matching
 FACE_REEMBED_INTERVAL_S = 2.0      # re-extract embedding if not confirmed for this long
 
 # ── Voice / Audio (WhisperX) ─────────────────────────────────────────
@@ -79,10 +83,12 @@ WEBCAM_FRAME_HEIGHT = 480
 WEBCAM_FPS = 15
 WEBCAM_SEND_INTERVAL_S = 0.33   # ~3 FPS to server (avoid flooding)
 
-# ── LLM ───────────────────────────────────────────────────────────────
+# ── LLM (OpenCode Zen — OpenAI-compatible) ─────────────────────────────
 
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
-ANTHROPIC_MAX_TOKENS_RECALL = 1024
-ANTHROPIC_MAX_TOKENS_ENROLL = 512
-ANTHROPIC_MAX_TOKENS_EXTRACT = 1000
-ANTHROPIC_MAX_TOKENS_NARRATE = 300
+OPENCODE_API_KEY = os.getenv("OPENCODE_API_KEY", "")
+OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
+OPENCODE_MODEL = "mimo-v2-5-free"
+OPENCODE_MAX_TOKENS_RECALL = 1024
+OPENCODE_MAX_TOKENS_ENROLL = 512
+OPENCODE_MAX_TOKENS_EXTRACT = 1000
+OPENCODE_MAX_TOKENS_NARRATE = 300
